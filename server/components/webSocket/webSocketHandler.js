@@ -2,24 +2,17 @@
 
 var config = require('../../config/environment');
 var WebSocketServer = require('ws').Server;
-var Configstore = require('configstore');
 var pkg = require('../../../package.json');
 var e;
-var conf = new Configstore(pkg.name, {foo: 'bar'});
-var Twit = require('twit');
-var T = new Twit(config);
-function zfill(num, len) {
-    var t = new Array(len);
-    return (t.join("0") + num).slice(-len);
-}
 var _ = require('lodash');
 var clients=2;
 var fs = require('fs');
-module.exports = function(server){
-  var wss = new WebSocketServer({ server: server });
-  var T = new Twit(config);
 
-  var tweets = [];
+module.exports = function(server, wss){
+
+  var tweets = [],
+      stream,
+      acl = {wList: [], bList: []};
 
   var connect = function(callback){
     wss.on('connection', function (ws) {
@@ -39,43 +32,54 @@ module.exports = function(server){
               });
           }
       });
-  }
+  };
 
-  var init = function(){
+  var forwardTweet = function (tweet) {
+      if (isAuthorized(tweet)){
+          tweets.push(tweet);
+          fs.writeFile(config.tweetlog || './tweets-log.json',
+                       JSON.stringify(tweets), function(err) {
+                           if( err ){
+                               console.log( err );
+                           }
+                       });
+                       wss.send(tweet, {mask: true});
+      }else{
+          console.log('DEBUG: no autorizado', tweet);
+      }
+
+  };
+
+  var init = function(_stream_){
     var tweetlog = config.tweetlog || './tweets-log.json';
+    stream = _stream_;
 
-    connect(function(ws){
+    connect(function(){
         loadTweets(tweetlog, function(_tweets_){
             tweets = _tweets_;
 
-            var stream = T.stream('statuses/filter', {
-                track: config.query || '@patovala'
-            });
-
             stream.on('tweet', function(tweet) {
-                console.log('debug:', tweet);
-                // TODO save the tweet and try to deliver to the client
-                ws.send(tweet, {mask: true});
+              forwardTweet(tweet);
             });
 
-            ws.on('message', function incoming(message) {
-                console.log('server:', message);
-
+            wss.on('message', function incoming(message) {
+                console.log('mensaje recibido websocket abierto: %s', message);
                 switch(message) {
                     case 'case':
                         // code
-                        console.log('mensaje recibido websocket abierto: %s', message);
-                    for(var i in clients){
-                        // Send a message to the client with the message
-                        clients[i].sendUTF(JSON.stringify(server.config));
-                    }
-                    break;
+                        for(var i in clients){
+                            // Send a message to the client with the message
+                            clients[i].sendUTF(JSON.stringify(server.config));
+                        }
+                        break;
+
                     case 'get_tweets':
-                        ws.send(getTweets());
-                    break;
+                        wss.send(getTweets());
+                        break;
+
                     case 'saveTweetsToDisks':
-                        saveTweetsToDisk();
-                    break;
+                        break;
+
                     default:
                         break;
                 }
@@ -85,25 +89,23 @@ module.exports = function(server){
 
   };
 
-  var collectTweetsFromTwitter = function(query, callback){
+  var isAuthorized = function(tweet){
+      var uName;
+      if (!tweet.user.screen_name){
+          return false;
+      }else{
+          uName = tweet.user.screen_name;
+      }
 
-  };
-
-  // Guardar los tweets en el disco en un txt en algun lado que nos diga config.store
-  var saveTweetsToDisk = function (){
-  fs.writeFile('./tweets.txt', JSON.stringify(getTweets()), function(err) {
-    conf.set('awesome', JSON.stringify(getTweets()));
-    if( err ){
-        console.log( err );
-        e =false;
-    }
-    else{
-        console.log(conf.get('awesome'));
-        console.log('Se ha escrito correctamente');
-        e = true;
-    }
-  })
-    return e;
+      if (_.contains(acl.bList, '*')){
+          return false;
+      }else if(_.contains(acl.bList, uName)){
+          return false;
+      }else if(_.contains(acl.wList, '*')){
+          return true;
+      }else{
+          return _.contains(acl.wList, uName);
+      }
   };
 
   /* Get the last tweets for today */
@@ -113,6 +115,8 @@ module.exports = function(server){
     var today = new Date();
     // filter tweets for today
     var tls = _.filter(tweets, function(i){
+      if(!i || !i.timestamp) return false;
+
       var tldate = new Date(i.timestamp);
       return _.isEqual([tldate.getDate(), tldate.getFullYear(), tldate.getMonth()],
                        [today.getDate(), today.getFullYear(), today.getMonth()]);
@@ -121,13 +125,28 @@ module.exports = function(server){
     return JSON.stringify(tls);
   };
 
+  /* Set a new stream to get new queries */
+  var setStream = function(s){
+    stream = s;
+  };
+
+  var addWhiteListUser = function(u){
+    acl.wList.push(u);
+  };
+
+  var addBlackListUser = function(u){
+    acl.bList.push(u);
+  };
+
   return {
     init: init,
-    saveTweetsToDisk:saveTweetsToDisk,
     getConfig: function(){
       return config;
-    }
-
+    },
+    setStream: setStream,
+    forwardTweet: forwardTweet,
+    addBlackListUser: addBlackListUser,
+    addWhiteListUser: addWhiteListUser
   }
 
 };
